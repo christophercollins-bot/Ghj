@@ -1,0 +1,323 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/example/calc
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AdvancedCalc"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=false
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.calc"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.calc"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes { release { isMinifyEnabled = false } }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Calculator"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/calc/Parser.kt <<'EOF'
+          package com.example.calc
+
+          import kotlin.math.*
+
+          /** Recursive-descent evaluator: + - * / ^ ! %, parentheses, constants, functions. */
+          class Parser(src: String, private val deg: Boolean) {
+              private val s = src.replace('÷', '/').replace('×', '*').replace('−', '-')
+                  .replace("√", "sqrt").replace(" ", "")
+              private var i = 0
+
+              fun parse(): Double {
+                  val v = expr()
+                  if (i < s.length) throw IllegalArgumentException("Unexpected '${s[i]}'")
+                  return v
+              }
+
+              private fun peek() = if (i < s.length) s[i] else '\u0000'
+
+              private fun expr(): Double {
+                  var v = term()
+                  while (true) when (peek()) {
+                      '+' -> { i++; v += term() }
+                      '-' -> { i++; v -= term() }
+                      else -> return v
+                  }
+              }
+
+              private fun term(): Double {
+                  var v = unary()
+                  while (true) when {
+                      peek() == '*' -> { i++; v *= unary() }
+                      peek() == '/' -> { i++; v /= unary() }
+                      peek() == '(' || peek().isLetter() || peek() == 'π' -> v *= unary() // implicit multiply
+                      else -> return v
+                  }
+              }
+
+              private fun unary(): Double = when (peek()) {
+                  '-' -> { i++; -unary() }
+                  '+' -> { i++; unary() }
+                  else -> power()
+              }
+
+              private fun power(): Double {
+                  val b = postfix()
+                  if (peek() == '^') { i++; return b.pow(unary()) }
+                  return b
+              }
+
+              private fun postfix(): Double {
+                  var v = primary()
+                  while (true) when (peek()) {
+                      '!' -> { i++; v = factorial(v) }
+                      '%' -> { i++; v /= 100 }
+                      else -> return v
+                  }
+              }
+
+              private fun primary(): Double {
+                  val c = peek()
+                  when {
+                      c.isDigit() || c == '.' -> {
+                          val st = i
+                          while (peek().isDigit() || peek() == '.') i++
+                          return s.substring(st, i).toDoubleOrNull() ?: throw IllegalArgumentException("Bad number")
+                      }
+                      c == '(' -> {
+                          i++
+                          val v = expr()
+                          if (peek() == ')') i++ else if (i < s.length) throw IllegalArgumentException("Missing )")
+                          return v
+                      }
+                      c == 'π' -> { i++; return PI }
+                      c.isLetter() -> {
+                          val st = i
+                          while (peek().isLetter()) i++
+                          val name = s.substring(st, i)
+                          if (name == "e") return E
+                          val a = unary()
+                          val r = if (deg) PI / 180 else 1.0
+                          return when (name) {
+                              "sin" -> sin(a * r)
+                              "cos" -> cos(a * r)
+                              "tan" -> tan(a * r)
+                              "asin" -> asin(a) / r
+                              "acos" -> acos(a) / r
+                              "atan" -> atan(a) / r
+                              "ln" -> ln(a)
+                              "log" -> log10(a)
+                              "sqrt" -> sqrt(a)
+                              "abs" -> abs(a)
+                              else -> throw IllegalArgumentException("Unknown '$name'")
+                          }
+                      }
+                  }
+                  throw IllegalArgumentException("Incomplete")
+              }
+
+              private fun factorial(v: Double): Double {
+                  if (v < 0 || v != floor(v) || v > 170) throw IllegalArgumentException("Invalid factorial")
+                  var r = 1.0
+                  for (k in 2..v.toInt()) r *= k
+                  return r
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/example/calc/MainActivity.kt <<'EOF'
+          package com.example.calc
+
+          import android.app.Activity
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.math.BigDecimal
+          import java.math.MathContext
+          import kotlin.math.abs
+
+          class MainActivity : Activity() {
+              private var expr = ""
+              private var lastAns = ""
+              private var deg = true
+              private lateinit var exprView: TextView
+              private lateinit var resView: TextView
+              private lateinit var degKey: TextView
+
+              private val bg = Color.parseColor("#F4F5F7")
+              private val ink = Color.parseColor("#1B1F27")
+              private val accent = Color.parseColor("#1F4FD8")
+              private val tint = Color.parseColor("#E6ECFA")
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private val rows = listOf(
+                  listOf("DEG", "sin", "cos", "tan", "log"),
+                  listOf("ln", "√", "x²", "^", "!"),
+                  listOf("π", "e", "(", ")", "%"),
+                  listOf("7", "8", "9", "÷", "AC"),
+                  listOf("4", "5", "6", "×", "⌫"),
+                  listOf("1", "2", "3", "−", "Ans"),
+                  listOf("0", ".", "+", "=")
+              )
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(bg)
+                      setPadding(dp(12), dp(12), dp(12), dp(12))
+                      fitsSystemWindows = true
+                  }
+                  exprView = TextView(this).apply {
+                      textSize = 26f; setTextColor(ink); gravity = Gravity.END or Gravity.BOTTOM
+                      maxLines = 3; setPadding(dp(8), dp(8), dp(8), 0)
+                  }
+                  resView = TextView(this).apply {
+                      textSize = 34f; setTextColor(accent); typeface = Typeface.DEFAULT_BOLD
+                      gravity = Gravity.END; maxLines = 1; setPadding(dp(8), 0, dp(8), dp(12))
+                  }
+                  root.addView(exprView, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1.2f))
+                  root.addView(resView, LinearLayout.LayoutParams(MATCH_PARENT, dp(64)))
+
+                  val pad = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  for (r in rows) {
+                      val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                      for (label in r) {
+                          val w = if (label == "0") 2f else 1f
+                          row.addView(key(label), LinearLayout.LayoutParams(0, MATCH_PARENT, w).apply {
+                              setMargins(dp(4), dp(4), dp(4), dp(4))
+                          })
+                      }
+                      pad.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+                  }
+                  root.addView(pad, LinearLayout.LayoutParams(MATCH_PARENT, 0, 4f))
+                  setContentView(root)
+                  refresh()
+              }
+
+              private fun key(label: String): TextView {
+                  val isOp = label in listOf("÷", "×", "−", "+", "^", "!", "%")
+                  val isSci = label in listOf("DEG", "sin", "cos", "tan", "log", "ln", "√", "x²", "π", "e", "(", ")")
+                  val fill = when {
+                      label == "=" -> accent
+                      isOp || isSci || label == "Ans" -> tint
+                      else -> Color.WHITE
+                  }
+                  val txt = when {
+                      label == "=" -> Color.WHITE
+                      label == "AC" -> Color.parseColor("#C62828")
+                      isOp || isSci || label == "Ans" -> accent
+                      else -> ink
+                  }
+                  return TextView(this).apply {
+                      text = label; gravity = Gravity.CENTER; setTextColor(txt)
+                      textSize = if (isSci || label == "Ans") 16f else 22f
+                      typeface = Typeface.DEFAULT_BOLD.takeIf { label == "=" } ?: Typeface.DEFAULT
+                      background = GradientDrawable().apply { setColor(fill); cornerRadius = dp(14).toFloat() }
+                      isClickable = true
+                      setOnClickListener { press(label) }
+                      if (label == "DEG") degKey = this
+                  }
+              }
+
+              private fun press(k: String) {
+                  when (k) {
+                      "AC" -> expr = ""
+                      "⌫" -> expr = expr.dropLast(1)
+                      "DEG" -> { deg = !deg; degKey.text = if (deg) "DEG" else "RAD" }
+                      "=" -> evaluate()?.let { expr = it; lastAns = it }
+                      "Ans" -> expr += lastAns
+                      "sin", "cos", "tan", "log", "ln", "√" -> expr += "$k("
+                      "x²" -> expr += "^2"
+                      else -> expr += k
+                  }
+                  refresh()
+              }
+
+              private fun evaluate(): String? = try {
+                  if (expr.isBlank()) null else format(Parser(expr, deg).parse())
+              } catch (e: Exception) { null }
+
+              private fun refresh() {
+                  exprView.text = expr
+                  resView.text = if (expr.isBlank()) "0" else evaluate() ?: ""
+              }
+
+              private fun format(v: Double): String {
+                  if (v.isNaN() || v.isInfinite()) throw ArithmeticException()
+                  if (abs(v) < 1e-12) return "0"
+                  if (abs(v) >= 1e12 || abs(v) < 1e-9) return String.format("%.8E", v)
+                  return BigDecimal(v).round(MathContext(12)).stripTrailingZeros().toPlainString()
+              }
+          }
+          EOF
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Calculator build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
